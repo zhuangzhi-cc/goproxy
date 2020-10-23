@@ -145,6 +145,7 @@ type Goproxy struct {
 	goBinWorkerChan chan struct{}
 	sumdbClient     *sumdb.Client
 	proxiedSUMDBs   map[string]string
+	Renames         map[string]string
 }
 
 // New returns a new instance of the `Goproxy` with default field values.
@@ -175,6 +176,7 @@ func New() *Goproxy {
 		},
 		goBinEnv:      map[string]string{},
 		proxiedSUMDBs: map[string]string{},
+		Renames:       map[string]string{},
 	}
 }
 
@@ -298,6 +300,9 @@ func (g *Goproxy) load() {
 
 // ServeHTTP implements the `http.Handler`.
 func (g *Goproxy) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
+
+	log.Printf("Request: %s", r.URL.String())
+
 	g.loadOnce.Do(g.load)
 
 	ctx := r.Context()
@@ -427,12 +432,15 @@ func (g *Goproxy) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 	}
 
 	escapedModulePath := nameParts[0]
-	modulePath, err := module.UnescapePath(escapedModulePath)
+	originalModulePath, err := module.UnescapePath(escapedModulePath)
 	if err != nil {
 		setResponseCacheControlHeader(rw, 86400)
 		responseNotFound(rw)
 		return
 	}
+
+	// Viper: rename package name
+	modulePath, from, to := rename(originalModulePath, g.Renames)
 
 	nameBase := nameParts[1]
 	nameExt := path.Ext(nameBase)
@@ -709,10 +717,16 @@ func (g *Goproxy) ServeHTTP(rw http.ResponseWriter, r *http.Request) {
 			filename = mr.Info
 		case ".mod":
 			filename = mr.GoMod
+
+			// Viper: rebuild mod file.
+			filename = rebuildMod(filename, to, from)
 		case ".zip":
 			filename = mr.Zip
-		}
 
+			// Viper: Rebuild zip file
+			filename = rebuildZip(filename, to, from)
+		}
+		log.Printf("file for: %s, is: %s\n", nameExt, filename)
 		cache, err = newTempCache(filename, name, newHash())
 		if err != nil {
 			g.logError(err)
